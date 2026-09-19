@@ -87,9 +87,7 @@ jobs:
           UPSTREAM_COMMIT='${{ steps.version.outputs.upstream_commit }}' \
           VERSION_CODE='${{ steps.version.outputs.version_code }}' \
           bash scripts/set-build-version.sh .config
-
           make defconfig
-
           echo "===== Custom packages ====="
           grep -E 'CONFIG_PACKAGE_(mwan3|luci-app-mwan3|luci-app-passwall|xray-core|sing-box|tcpdump)' .config || true
           
