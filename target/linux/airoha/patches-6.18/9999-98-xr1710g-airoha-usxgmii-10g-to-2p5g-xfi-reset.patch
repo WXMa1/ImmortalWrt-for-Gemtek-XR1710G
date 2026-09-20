@@ -1,0 +1,79 @@
+--- a/drivers/net/pcs/airoha/pcs-airoha.h
++++ b/drivers/net/pcs/airoha/pcs-airoha.h
+@@ -1262,6 +1262,7 @@ struct airoha_pcs_port {
+ 	struct airoha_pcs_priv *priv;
+ 	phy_interface_t interface;
+ 	int index;
++	int last_speed;
+
+ 	struct phylink_pcs pcs;
+ };
+--- a/drivers/net/pcs/airoha/pcs-airoha-common.c
++++ b/drivers/net/pcs/airoha/pcs-airoha-common.c
+@@ -688,6 +688,36 @@ static void airoha_pcs_link_up(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 	maps = &priv->maps[port->index];
+ 	data = priv->data;
+
++	/*
++	 * XR1710G/RTL8261BE can leave the AN7581 host-side XFI datapath in a
++	 * stale state after an in-band USXGMII 10G -> 2.5G transition.
++	 *
++	 * A full netdev close/open recovers the datapath because
++	 * airoha_pcs_pre_config() pulses XFI MAC logic reset.  A normal
++	 * carrier loss only reaches airoha_pcs_link_down(), which stops
++	 * MPI/MBI but does not pulse that reset.
++	 *
++	 * Keep this first workaround deliberately narrow so that the
++	 * known-good 2.5G->2.5G, 2.5G->10G and 10G->10G transitions are
++	 * left untouched.
++	 */
++	if (neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED &&
++	    interface == PHY_INTERFACE_MODE_USXGMII) {
++		dev_info(priv->dev,
++			 "PCS%d: USXGMII in-band link-up %d -> %d Mbps\n",
++			 port->index, port->last_speed, speed);
++
++		if (port->last_speed == SPEED_10000 && speed == SPEED_2500) {
++			dev_info(priv->dev,
++				 "PCS%d: reset XFI MAC for 10G -> 2.5G transition\n",
++				 port->index);
++
++			regmap_set_bits(maps->pcs_mac,
++					AIROHA_PCS_XFI_MAC_XFI_GIB_CFG,
++					AIROHA_PCS_XFI_RXMPI_STOP |
++					AIROHA_PCS_XFI_RXMBI_STOP |
++					AIROHA_PCS_XFI_TXMPI_STOP |
++					AIROHA_PCS_XFI_TXMBI_STOP);
++			regmap_clear_bits(maps->pcs_mac,
++					  AIROHA_PCS_XFI_MAC_XFI_LOGIC_RST,
++					  AIROHA_PCS_XFI_MAC_LOGIC_RST);
++			regmap_set_bits(maps->pcs_mac,
++					AIROHA_PCS_XFI_MAC_XFI_LOGIC_RST,
++					AIROHA_PCS_XFI_MAC_LOGIC_RST);
++			usleep_range(1000, 2000);
++			regmap_set_bits(maps->pcs_mac,
++					AIROHA_PCS_XFI_MAC_XFI_CNT_CLR,
++					AIROHA_PCS_XFI_GLB_CNT_CLR);
++		}
++	}
++
+ 	if (neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED) {
+ 		if (interface == PHY_INTERFACE_MODE_SGMII) {
+ 			regmap_update_bits(maps->hsgmii_rate_adp,
+@@ -843,6 +873,8 @@ static void airoha_pcs_link_up(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 				  AIROHA_PCS_XFI_RXMBI_STOP |
+ 				  AIROHA_PCS_XFI_TXMPI_STOP |
+ 				  AIROHA_PCS_XFI_TXMBI_STOP);
++
++	port->last_speed = speed;
+ }
+
+ static void airoha_pcs_link_down(struct phylink_pcs *pcs)
+@@ -1218,6 +1250,7 @@ static int airoha_pcs_probe(struct platform_device *pdev)
+
+ 		port->priv = priv;
+ 		port->index = index;
++		port->last_speed = SPEED_UNKNOWN;
+ 		port->pcs.poll = true;
+ 		port->pcs.ops = &airoha_pcs_ops;
+
